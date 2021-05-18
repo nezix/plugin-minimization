@@ -50,10 +50,10 @@ class MinimizationMenu():
             self.__plugin.update_content(btn)
 
         def change_steps(btn):
-            if btn.text.value_idle == "+":
+            if btn.text.value.idle == "+":
                 self.__nb_steps += 500
                 self.__nb_steps = min(self.__nb_steps, 5000)
-            elif btn.text.value_idle == "-":
+            elif btn.text.value.idle == "-":
                 self.__nb_steps -= 500
                 self.__nb_steps = max(self.__nb_steps, 500)
             self.__steps_label.text_value = str(self.__nb_steps)
@@ -95,4 +95,4 @@ class MinimizationMenu():
     def __get_selected_forcefield(self):
         if self.__selected_ff_btn == None:
             return 'Uff'
-        return self.__selected_ff_btn.text.value_idle
+        return self.__selected_ff_btn.text.value.idle

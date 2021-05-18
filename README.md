@@ -8,7 +8,7 @@ Minimization arranges the selected molecule to try to find a geometry where inte
 
 When running outside of Docker:
 
-This plugin requires `nanobabel` to exist in the working directory, or for the path to be specified in the environment variable `NANOBABEL`.
+This plugin requires `openmm`.
 
 ## Usage
 

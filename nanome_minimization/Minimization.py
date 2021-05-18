@@ -6,14 +6,10 @@ from nanome.util import Logs
 from ._MinimizationMenu import MinimizationMenu
 from ._MinimizationProcess import MinimizationProcess
 
-NANOBABEL = os.environ.get('NANOBABEL', os.path.join(os.getcwd(), 'nanobabel'))
-if not os.path.exists(NANOBABEL):
-    NANOBABEL = None
-
 class Minimization(nanome.PluginInstance):
     def start(self):
         self.__menu = MinimizationMenu(self)
-        self._process = MinimizationProcess(self, NANOBABEL)
+        self._process = MinimizationProcess(self)
         self.__menu.build_menu()
         self.__integration_request = None
         self.integration.minimization_start = self.start_integration
@@ -86,11 +82,13 @@ class Minimization(nanome.PluginInstance):
         return 'Uff'
 
 def main():
-    if not NANOBABEL:
-        Logs.error('Error: nanobabel not found, please set NANOBABEL env var')
+    try:
+        from simtk import testInstallation
+    except:
+        Logs.error('Error: openmm not found, please install OpenMM via conda')
         sys.exit(1)
 
-    plugin = nanome.Plugin("Minimization", "Run minimization on selected structures. See Advanced Parameters for forcefield, number of steps, and steepest descent", "Minimization", True)
+    plugin = nanome.Plugin("MinimizationOpenMM", "Run minimization on selected structures. See Advanced Parameters for forcefield, number of steps, and steepest descent", "Minimization", True)
     plugin.set_plugin_class(Minimization)
     plugin.run()
 
