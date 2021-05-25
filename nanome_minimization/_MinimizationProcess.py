@@ -41,10 +41,9 @@ class MinimizationProcess():
         self._is_running = False
         self.__process_running = False
         self.__stream = None
-        self.__data_queue = []
         #TODO: change this to AdvancedSettings value
-        self.__platform = Platform.getPlatformByName("CUDA")
-        self.__platform_properties = {'CudaPrecision': 'single'}
+        # self.__platform = Platform.getPlatformByName("CUDA")
+        # self.__platform_properties = {'CudaPrecision': 'single'}
         self.__forcefield_names = ["amber99sb.xml"]
         self.__forcefield = ForceField(*self.__forcefield_names)
         #OpenMM minimizer needs one but does not use it
@@ -120,14 +119,10 @@ class MinimizationProcess():
                 return
 
             self.__stream = stream
-            self.__data_queue = deque()
-
-            Logs.debug("Read pdb file with openmm")
 
             #Init openmm system
             ommpdb = PDBFile(input_file.name)
 
-            Logs.debug("Create openmm system")
             self.__openmm_system = self.__forcefield.createSystem(ommpdb.topology)
             self.__integrator = LangevinIntegrator(300*kelvin, 1/picosecond, 0.002*picoseconds)
 
@@ -136,8 +131,11 @@ class MinimizationProcess():
             ommpdb.topology = topology
             ommpdb.positions = positions
 
-            self.__simulation = Simulation(ommpdb.topology, self.__openmm_system, self.__integrator, self.__platform, self.__platform_properties)
+            #self.__simulation = Simulation(ommpdb.topology, self.__openmm_system, self.__integrator, self.__platform, self.__platform_properties)
+            #By default, OpenMM picks the fastest platform
+            self.__simulation = Simulation(ommpdb.topology, self.__openmm_system, self.__integrator)
 
+            #Assign zero mass to all __atom_to_restrain when creating the openmm system
             if self.__atom_to_restrain and len(self.__atom_to_restrain) > 0:
                 #setup contraints to fix atoms in position
                 self.__restraint = HarmonicBondForce()#used to fix an atom in one position
@@ -150,7 +148,6 @@ class MinimizationProcess():
                     ommpdb.positions.append(ommpdb.positions[i])
                 Logs.debug("Restraining", len(self.__atom_to_restrain), "atoms")
 
-            Logs.debug("Starting set positions")
             self.__simulation.context.setPositions(ommpdb.positions)
 
             self.__process_running = True
@@ -174,7 +171,6 @@ class MinimizationProcess():
             self.stop_process()
             return
         Logs.debug("Wrote input file:", input_file.name)
-        #TODO assign zero mass to all saved_atoms when creating the openmm system
 
         self.__stream = self.__plugin.create_writing_stream(indices, StreamType.position, on_stream_creation)
 
@@ -193,12 +189,7 @@ class MinimizationProcess():
                 not self.__updates_done[self.__packet_id - PACKET_QUEUE_LEN]:
             return
 
-        if len(self.__data_queue) > 0:
-            Logs.debug("chunk")
-            # data_chunk = self.__data_queue.popleft()
-            # complex = nanome.api.structure.Complex.io.from_pdb(lines=data_chunk)
-            # self.__match_and_move(complex)
-        elif not self.__process_running:
+        if not self.__process_running:
             Logs.debug('Minimization complete')
             self.stop_process()
         
@@ -242,15 +233,6 @@ class MinimizationProcess():
     #     self.__stream.update(positions, partial(self.__update_done, self.__packet_id))
     #     self.__packet_id += 1
 
-    def __processing_output(self, split_output):
-        for line in split_output:
-            if "Step update start" in line:
-                self.__output_lines.clear()
-            elif "Step update end" in line:
-                self.__data_queue.append(self.__output_lines.copy())
-            else:
-                self.__output_lines.append(line)
-
 
     def __save_atoms(self, path, workspace, complexes):
         selected_atoms = Octree()
@@ -258,6 +240,8 @@ class MinimizationProcess():
         selected_atoms_per_complex = {}
         close_atoms_per_complex = {}
         fcomplexes = []
+
+        #Add all atoms to an Octree
         for compl in complexes:
             fcomplex = compl.convert_to_frames()
             fcomplexes.append(fcomplex)
@@ -282,7 +266,8 @@ class MinimizationProcess():
         serial = 1
         found_atoms = []
 
-        # #Check for close atoms (7A radius) that are not in selection
+        # Check for close atoms (7A radius) that are not in selection
+        # These atoms will be fixed in position when creating the OpenMM system
         for curComplex in fcomplexes:
             complex_local_to_workspace_matrix = curComplex.get_complex_to_workspace_matrix()
             molecule = curComplex._molecules[curComplex.current_frame]
@@ -301,16 +286,15 @@ class MinimizationProcess():
                     found_atoms.clear()
 
 
-        #Convert selected atoms to an openmm system with complexes separated
+        #Convert selected atoms to an openmm system with separated complexes
         openmm_main_pdb = None
         for curComplex in fcomplexes:
             atoms = selected_atoms_per_complex[curComplex.name]
             if len(atoms) > 0:
-                # This cannot work for now
+                # This cannot work for now, bug is getting fixed
                 # pdb_options.only_save_these_atoms = atoms
                 temp_pdb = tempfile.NamedTemporaryFile(delete=False, suffix='.pdb')
 
-                # Logs.debug(temp_pdb.name)
                 curComplex.io.to_pdb(temp_pdb.name, pdb_options)
                 temp_openmm_pdb = PDBFile(temp_pdb.name)
                 if openmm_main_pdb == None:
@@ -323,9 +307,7 @@ class MinimizationProcess():
         if openmm_main_pdb == None:
             Logs.error("Something went wrong processing minimization files")
             return (None, None)
-        Logs.debug("Writting main input openmm file",path)
         PDBFile.writeFile(openmm_main_pdb.topology, openmm_main_pdb.positions, open(path, "w"))
-        # result_complex.io.to_pdb(path, pdb_options)
         return (saved_atoms, saved_atoms_indices)
 
     def minimization_result(self, positions, energy):
