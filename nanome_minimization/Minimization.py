@@ -70,16 +70,16 @@ class Minimization(nanome.PluginInstance):
 
     def convert_forcefield_value(self, value):
         if value == "General Amber" or value == 1:
-            return 'Gaff'
-        elif value == "Ghemical" or value == 2:
-            return 'Ghemical'
-        elif value == "MMFF94" or value == 3:
-            return 'MMFF94'
-        elif value == "MMFF94s" or value == 4:
-            return 'MMFF94s'
-        elif value == "Universal" or value == 0:
-            return 'Uff'
-        return 'Uff'
+            return 'gaff'
+        elif value.upper() == "AMBER" or value == 2:
+            return 'amber'
+        elif value.upper() == "CHARMM" or value == 3:
+            return 'charmm'
+        elif value.upper() == "SMIRNOFF" or value == 4:
+            return 'smirnoff'
+        elif value == "Universal" or value == "OpenFF" or value == 0:
+            return 'openff'
+        return 'openff'
 
 def main():
     try:

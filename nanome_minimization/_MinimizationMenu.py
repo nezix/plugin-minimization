@@ -78,10 +78,10 @@ class MinimizationMenu():
 
         # setting callbacks
         menu.root.find_node("general_amber", True).get_content().register_pressed_callback(ff_selected)
-        menu.root.find_node("ghemical", True).get_content().register_pressed_callback(ff_selected)
-        menu.root.find_node("mmff94", True).get_content().register_pressed_callback(ff_selected)
-        menu.root.find_node("mmff94s", True).get_content().register_pressed_callback(ff_selected)
-        universal_btn = menu.root.find_node("universal", True).get_content()
+        menu.root.find_node("amber", True).get_content().register_pressed_callback(ff_selected)
+        menu.root.find_node("charmm", True).get_content().register_pressed_callback(ff_selected)
+        menu.root.find_node("smirnoff", True).get_content().register_pressed_callback(ff_selected)
+        universal_btn = menu.root.find_node("openff", True).get_content()
         universal_btn.register_pressed_callback(ff_selected)
         universal_btn.selected = True
         self.__selected_ff_btn = universal_btn

@@ -12,6 +12,12 @@ from simtk.unit import *
 from simtk.openmm.app.element import *
 from pdbfixer.pdbfixer import PDBFixer, proteinResidues, dnaResidues, rnaResidues, _guessFileFormat
 
+from openff.toolkit.topology import Molecule
+from openff.toolkit.topology import Topology
+from openmmforcefields.generators import GAFFTemplateGenerator
+from openmmforcefields.generators import SMIRNOFFTemplateGenerator
+from openmmforcefields.generators import SystemGenerator
+
 import tempfile
 from collections import deque
 from functools import partial
@@ -19,9 +25,7 @@ import os, sys, threading, io
 
 PACKET_QUEUE_LEN = 20
 
-IS_WIN = sys.platform.startswith('win')
 SDFOPTIONS = Complex.io.SDFSaveOptions()
-SDFOPTIONS.write_bonds = True
 
 pdb_options = PDBOptions()
 pdb_options.write_bonds = True
@@ -42,11 +46,11 @@ class MinimizationProcess():
         self.__process_running = False
         self.__stream = None
         #TODO: change this to AdvancedSettings value
-        # self.__platform = Platform.getPlatformByName("CUDA")
-        # self.__platform_properties = {'CudaPrecision': 'single'}
-        self.__forcefield_names = ["amber99sb.xml"]
-        self.__forcefield = ForceField(*self.__forcefield_names)
-        #OpenMM minimizer needs one but does not use it
+        #FF for openbabel: GeneralAmber (Gaff), Ghemical, MMFF94, MMFF94s, Universal
+        #FF for OpenMM: GeneralAmber (Gaff), Amber (ff14SB), CHARMM, OpenForceField (openff & smirnoff)
+        # https://github.com/openmm/openmmforcefields
+        self.__forcefield_names = ["amber/protein.ff14SB.xml", "amber/tip3p_standard.xml", "amber/tip3p_HFE_multivalent.xml",\
+        "charmm/toppar_all36_prot_model.xml", "gaff-2.11", "openff-1.3.0", "smirnoff99Frosst-1.1.0"]
         self._updateRate = 100
 
     @staticmethod
@@ -121,19 +125,45 @@ class MinimizationProcess():
             self.__stream = stream
 
             #Init openmm system
-            ommpdb = PDBFile(input_file.name)
 
-            self.__openmm_system = self.__forcefield.createSystem(ommpdb.topology)
+            self._custom_generator = None
+            selected_forcefields = []
+            forcefield_kwargs = { 'constraints' : HBonds, 'rigidWater' : True, 'removeCMMotion' : False, 'hydrogenMass' : 4*amu }
+
+            for f in self.__forcefield_names:
+                if f.startswith(ff):
+                    selected_forcefields.append(f)
+
+            if len(selected_forcefields) == 1:
+                curff = selected_forcefields[0]
+                if curff.startswith("gaff") or curff.startswith("openff") or curff.startswith("smirnoff"):
+                    self._custom_generator = SystemGenerator(forcefields=["amber/protein.ff14SB.xml", "amber/tip3p_standard.xml"], small_molecule_forcefield=curff, forcefield_kwargs=forcefield_kwargs, cache='db.json')
+
+            Logs.debug("Selected forcefields:", selected_forcefields)
+
             self.__integrator = LangevinIntegrator(300*kelvin, 1/picosecond, 0.002*picoseconds)
 
-            (topology, positions) = self.delete_alternate_atoms(ommpdb.topology, ommpdb.positions)
+            if self._custom_generator == None: #Not a general forcefield 
+                ommpdb = PDBFile(input_file.name)
+                self.__forcefield = ForceField(*selected_forcefields)
+                self.__openmm_system = self.__forcefield.createSystem(ommpdb.topology)
+                (topology, positions) = self.delete_alternate_atoms(ommpdb.topology, ommpdb.positions)
 
-            ommpdb.topology = topology
-            ommpdb.positions = positions
+                ommpdb.topology = topology
+                ommpdb.positions = positions
 
-            #self.__simulation = Simulation(ommpdb.topology, self.__openmm_system, self.__integrator, self.__platform, self.__platform_properties)
+                self.__openmm_topology = ommpdb.topology
+                self.__openmm_positions = ommpdb.positions
+
+            else: # General forcefields (Gaff/openff/smirnoff)
+                molecules = Molecule.from_file(self.__het_sdf_path, file_format='sdf')
+                off_topology = molecules.to_topology()
+                self.__openmm_topology = off_topology.to_openmm()
+                self.__openmm_positions = molecules.conformers[0]._value
+                self.__openmm_system = system_generator.create_system(self.__openmm_topology, molecules=molecules)
+
             #By default, OpenMM picks the fastest platform
-            self.__simulation = Simulation(ommpdb.topology, self.__openmm_system, self.__integrator)
+            self.__simulation = Simulation(self.__openmm_topology, self.__openmm_system, self.__integrator)
 
             #Assign zero mass to all __atom_to_restrain when creating the openmm system
             if self.__atom_to_restrain and len(self.__atom_to_restrain) > 0:
@@ -145,10 +175,10 @@ class MinimizationProcess():
                     j = self.__openmm_system.addParticle(0)
                     nonbonded.addException(i, j, 0, 1, 0)
                     self.__restraint.addBond(i, j, 0*nanometers, 100*kilojoules_per_mole/nanometer**2)
-                    ommpdb.positions.append(ommpdb.positions[i])
+                    self.__openmm_positions.append(self.__openmm_positions[i])
                 Logs.debug("Restraining", len(self.__atom_to_restrain), "atoms")
 
-            self.__simulation.context.setPositions(ommpdb.positions)
+            self.__simulation.context.setPositions(self.__openmm_positions)
 
             self.__process_running = True
             self._is_running = True
@@ -170,7 +200,6 @@ class MinimizationProcess():
             self.__plugin.send_notification(nanome.util.enums.NotificationTypes.warning, "No atom selected")
             self.stop_process()
             return
-        Logs.debug("Wrote input file:", input_file.name)
 
         self.__stream = self.__plugin.create_writing_stream(indices, StreamType.position, on_stream_creation)
 
@@ -286,28 +315,60 @@ class MinimizationProcess():
                     found_atoms.clear()
 
 
+        het_complex = nanome.structure.Complex()
+        het_molecule = nanome.structure.Molecule()
+        het_chain = nanome.structure.Chain()
+        het_residue = nanome.structure.Residue()
+        het_complex.add_molecule(het_molecule)
+        het_molecule.add_chain(het_chain)
+        het_chain.add_residue(het_residue)
+        het_bonds = []
+
+        count_het = 0
         #Convert selected atoms to an openmm system with separated complexes
+        #Hetero atoms are written in a different file
         openmm_main_pdb = None
         for curComplex in fcomplexes:
             atoms = selected_atoms_per_complex[curComplex.name]
             if len(atoms) > 0:
+
+                for a in atoms:
+                    saved_atoms_indices.append(a.index)
+                    if a.is_het:
+                        het_residue.add_atom(a)
+                        count_het+=1
+                        for bond in a.bonds:
+                            if bond not in het_bonds:
+                                het_bonds.append(bond)
+                                het_residue.add_bond(bond)
+                        #remove het atom from the complex to avoid writing it to the pdb
+                        # a.residue.remove_atom(a)
+                
+
                 # This cannot work for now, bug is getting fixed
                 # pdb_options.only_save_these_atoms = atoms
                 temp_pdb = tempfile.NamedTemporaryFile(delete=False, suffix='.pdb')
 
                 curComplex.io.to_pdb(temp_pdb.name, pdb_options)
+
                 temp_openmm_pdb = PDBFile(temp_pdb.name)
                 if openmm_main_pdb == None:
                     openmm_main_pdb = Modeller(temp_openmm_pdb.topology, temp_openmm_pdb.positions)
                 else:
                     openmm_main_pdb.add(temp_openmm_pdb.topology, temp_openmm_pdb.positions)
-                for a in atoms:
-                    saved_atoms_indices.append(a.index)
+
+
+        if count_het > 0:
+            temp_sdf = tempfile.NamedTemporaryFile(delete=False, suffix='.sdf')
+            het_complex.io.to_sdf(temp_sdf.name, SDFOPTIONS)
+            self.__het_sdf_path = temp_sdf.name
+            Logs.debug("Wrote",count_het,"HET atoms to sdf file", temp_sdf.name)
 
         if openmm_main_pdb == None:
             Logs.error("Something went wrong processing minimization files")
             return (None, None)
         PDBFile.writeFile(openmm_main_pdb.topology, openmm_main_pdb.positions, open(path, "w"))
+        Logs.debug("Wrote input file:", path)
         return (saved_atoms, saved_atoms_indices)
 
     def minimization_result(self, positions, energy):
