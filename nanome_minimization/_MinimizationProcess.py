@@ -18,6 +18,9 @@ from openmmforcefields.generators import GAFFTemplateGenerator
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from openmmforcefields.generators import SystemGenerator
 
+from rdkit.Chem import AllChem
+from rdkit import Chem
+
 import tempfile
 from collections import deque
 from functools import partial
@@ -156,11 +159,17 @@ class MinimizationProcess():
                 self.__openmm_positions = ommpdb.positions
 
             else: # General forcefields (Gaff/openff/smirnoff)
-                molecules = Molecule.from_file(self.__het_sdf_path, file_format='sdf')
-                off_topology = molecules.to_topology()
+                mols = Chem.SDMolSupplier(self.__het_sdf_path)
+                m = mols[0] #TODO: check if we have more than one molecule
+                mh = Chem.AddHs(m)
+                AllChem.EmbedMolecule(mh)  #generate a 3D conformation to avoid the errors before
+                Chem.rdmolops.AssignAtomChiralTagsFromStructure(mh)    #very important, else you'll repeat the errors from before
+
+                omm_mol = Molecule.from_rdkit(mh)
+                off_topology = omm_mol.to_topology()
                 self.__openmm_topology = off_topology.to_openmm()
-                self.__openmm_positions = molecules.conformers[0]._value
-                self.__openmm_system = system_generator.create_system(self.__openmm_topology, molecules=molecules)
+                self.__openmm_positions = omm_mol.conformers[0]._value
+                self.__openmm_system = self._custom_generator.create_system(self.__openmm_topology, molecules=omm_mol)
 
             #By default, OpenMM picks the fastest platform
             self.__simulation = Simulation(self.__openmm_topology, self.__openmm_system, self.__integrator)
@@ -343,7 +352,7 @@ class MinimizationProcess():
                                 het_residue.add_bond(bond)
                         #remove het atom from the complex to avoid writing it to the pdb
                         # a.residue.remove_atom(a)
-                
+
 
                 # This cannot work for now, bug is getting fixed
                 # pdb_options.only_save_these_atoms = atoms
