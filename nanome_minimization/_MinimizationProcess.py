@@ -404,9 +404,7 @@ class MinimizationProcess():
                                 sim_atom = cur_topo.addAtom(atom_name, symbol, sim_residue)
                                 added_atoms[atom.index] = sim_atom
                                 position = atom.position
-                                positions.append(position.x * 0.1 * nanometer)
-                                positions.append(position.y * 0.1 * nanometer)
-                                positions.append(position.z * 0.1 * nanometer)
+                                positions.append([float(position.x*0.1), float(position.y*0.1), float(position.z*0.1)])
                                 #positions.append(Vec3(position.x * 0.1 * nanometer, position.y * 0.1 * nanometer, position.z * 0.1 * nanometer))
                             if atom.is_het:
                                 het_residue.add_atom(atom)
@@ -424,13 +422,10 @@ class MinimizationProcess():
                                     atom2 = added_atoms[bond.atom2.index]
                                     btype = self._get_bond_type(bond.kind)
                                     cur_topo.addBond(atom1, atom2, btype)
-                    n = int(len(positions)/3)
-                    positions = np.reshape(positions, (n, 3))
                     if openmm_main_pdb == None:
                         openmm_main_pdb = Modeller(cur_topo, positions)
                     else:
                         openmm_main_pdb.add(cur_topo, positions)
-                    Logs.debug(openmm_main_pdb.getPositions())
                 
         Logs.debug("Hetero atoms count =", count_het)
 
