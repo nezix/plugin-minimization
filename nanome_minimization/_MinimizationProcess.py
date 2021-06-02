@@ -5,12 +5,7 @@ from nanome.util.stream import StreamCreationError
 from nanome.util.enums import NotificationTypes, StreamType
 
 from nanome._internal._structure._io._pdb.save import Options as PDBOptions
-
-from simtk.openmm.app import *
-from simtk.openmm import *
-from simtk.unit import *
-from simtk.openmm.app.element import *
-from pdbfixer.pdbfixer import PDBFixer, proteinResidues, dnaResidues, rnaResidues, _guessFileFormat
+from nanome._internal._structure._bond import _Bond
 
 from openff.toolkit.topology import Molecule
 from openff.toolkit.topology import Topology
@@ -18,9 +13,16 @@ from openmmforcefields.generators import GAFFTemplateGenerator
 from openmmforcefields.generators import SMIRNOFFTemplateGenerator
 from openmmforcefields.generators import SystemGenerator
 
+from simtk.openmm.app import *
+from simtk.openmm import *
+from simtk.unit import *
+from simtk.openmm.app.element import *
+from pdbfixer.pdbfixer import PDBFixer, proteinResidues, dnaResidues, rnaResidues, _guessFileFormat
+
 from rdkit.Chem import AllChem
 from rdkit import Chem
 
+import numpy as np
 import tempfile
 from collections import deque
 from functools import partial
@@ -32,6 +34,11 @@ SDFOPTIONS = Complex.io.SDFSaveOptions()
 
 pdb_options = PDBOptions()
 pdb_options.write_bonds = True
+
+pdb_options_no_het = PDBOptions()
+pdb_options_no_het.write_bonds = True
+pdb_options_no_het.write_het_bonds = False
+pdb_options_no_het.write_het_atoms = False
 
 # hack to fix convert_to_frames killing atom indices:
 _atom_shallow_copy = nanome._internal._structure._Atom._shallow_copy
@@ -56,8 +63,7 @@ class MinimizationProcess():
         "charmm/toppar_all36_prot_model.xml", "gaff-2.11", "openff-1.3.0", "smirnoff99Frosst-1.1.0"]
         self._updateRate = 100
 
-    @staticmethod
-    def get_bond_type(kind):
+    def _get_bond_type(self, kind):
         if kind == _Bond.Kind.CovalentSingle:
             return Single
         if kind == _Bond.Kind.CovalentDouble:
@@ -159,17 +165,24 @@ class MinimizationProcess():
                 self.__openmm_positions = ommpdb.positions
 
             else: # General forcefields (Gaff/openff/smirnoff)
-                mols = Chem.SDMolSupplier(self.__het_sdf_path)
-                m = mols[0] #TODO: check if we have more than one molecule
-                mh = Chem.AddHs(m)
-                AllChem.EmbedMolecule(mh)  #generate a 3D conformation to avoid the errors before
-                Chem.rdmolops.AssignAtomChiralTagsFromStructure(mh)    #very important, else you'll repeat the errors from before
+                # mols = Chem.SDMolSupplier(self.__het_sdf_path)
+                # m = mols[0] #TODO: check if we have more than one molecule
+                # mh = Chem.AddHs(m)
+                # AllChem.EmbedMolecule(mh)  #generate a 3D conformation to avoid the errors before
+                # Chem.rdmolops.AssignAtomChiralTagsFromStructure(mh)    #very important, else you'll repeat the errors from before
 
-                omm_mol = Molecule.from_rdkit(mh)
-                off_topology = omm_mol.to_topology()
-                self.__openmm_topology = off_topology.to_openmm()
-                self.__openmm_positions = omm_mol.conformers[0]._value
-                self.__openmm_system = self._custom_generator.create_system(self.__openmm_topology, molecules=omm_mol)
+                # omm_mol = Molecule.from_rdkit(mh)
+                # off_topology = omm_mol.to_topology()
+                # self.__openmm_topology = off_topology.to_openmm()
+                # self.__openmm_positions = omm_mol.conformers[0]._value
+                # self.__openmm_system = self._custom_generator.create_system(self.__openmm_topology, molecules=omm_mol)
+                from openff.toolkit.typing.engines.smirnoff import ForceField
+                force_field = ForceField('openff_unconstrained-1.0.0.offxml')
+                ligand_off_molecule = Molecule(self.__het_sdf_path)
+                self.__openmm_topology = ligand_off_molecule.to_topology()
+                self.__openmm_system = force_field.create_openmm_system(self.__openmm_topology)
+                self.__openmm_positions = ligand_off_molecule.conformers[0]
+
 
             #By default, OpenMM picks the fastest platform
             self.__simulation = Simulation(self.__openmm_topology, self.__openmm_system, self.__integrator)
@@ -272,6 +285,27 @@ class MinimizationProcess():
     #     self.__packet_id += 1
 
 
+    def __get_atom_symbol(self, name, atoms_nb):
+        upper = name.upper()
+        if upper.startswith('CL'):
+            return chlorine
+        elif upper.startswith('NA'):
+            return sodium
+        elif upper.startswith('MG'):
+            return magnesium
+        elif upper.startswith('BE'):
+            return beryllium
+        elif upper.startswith('LI'):
+            return lithium
+        elif upper.startswith('K'):
+            return potassium
+        elif upper.startswith('ZN'):
+            return zinc
+        elif (atoms_nb == 1 and upper.startswith('CA')):
+            return calcium
+        else:
+            return Element.getBySymbol(upper[0])
+
     def __save_atoms(self, path, workspace, complexes):
         selected_atoms = Octree()
         count_selected_atoms = 0
@@ -305,7 +339,7 @@ class MinimizationProcess():
         found_atoms = []
 
         # Check for close atoms (7A radius) that are not in selection
-        # These atoms will be fixed in position when creating the OpenMM system
+        # These atoms will later be fixed in position when creating the OpenMM system
         for curComplex in fcomplexes:
             complex_local_to_workspace_matrix = curComplex.get_complex_to_workspace_matrix()
             molecule = curComplex._molecules[curComplex.current_frame]
@@ -315,15 +349,18 @@ class MinimizationProcess():
                     atom_absolute_pos = complex_local_to_workspace_matrix * atom.position
                     selected_atoms.get_near_append(atom_absolute_pos, 7, found_atoms, max_result_nb=1)
                     if len(found_atoms) > 0 and atom not in selected_atoms_per_complex[atom.complex]:
-                        if not atom.complex in close_atoms_per_complex:
-                            close_atoms_per_complex[atom.complex] = []
-                        if not atom in close_atoms_per_complex[atom.complex]:
-                            close_atoms_per_complex[atom.complex].append(atom)
+                        if not atom.complex.name in close_atoms_per_complex:
+                            close_atoms_per_complex[atom.complex.name] = []
+                        if not atom in close_atoms_per_complex[atom.complex.name]:
+                            close_atoms_per_complex[atom.complex.name].append(atom)
                         if not atom in __atom_to_restrain:
                             self.__atom_to_restrain.add(atom)
                     found_atoms.clear()
 
 
+        Logs.debug("Close to selection atoms:", len(self.__atom_to_restrain))
+
+        #Create an empty complex to store hetero atoms
         het_complex = nanome.structure.Complex()
         het_molecule = nanome.structure.Molecule()
         het_chain = nanome.structure.Chain()
@@ -333,39 +370,69 @@ class MinimizationProcess():
         het_chain.add_residue(het_residue)
         het_bonds = []
 
-        count_het = 0
-        #Convert selected atoms to an openmm system with separated complexes
-        #Hetero atoms are written in a different file
         openmm_main_pdb = None
+        PDBFile._loadNameReplacementTables()
+
+        count_het = 0
+
+        #Convert Nanome complex to OpenMM topologies, one per molecule
+        #Only keep selected or close to selection atoms and not hetero atoms
+        #Hetero atoms are stored in a Nanome complex
         for curComplex in fcomplexes:
-            atoms = selected_atoms_per_complex[curComplex.name]
-            if len(atoms) > 0:
-
-                for a in atoms:
-                    saved_atoms_indices.append(a.index)
-                    if a.is_het:
-                        het_residue.add_atom(a)
-                        count_het+=1
-                        for bond in a.bonds:
-                            if bond not in het_bonds:
-                                het_bonds.append(bond)
-                                het_residue.add_bond(bond)
-                        #remove het atom from the complex to avoid writing it to the pdb
-                        # a.residue.remove_atom(a)
-
-
-                # This cannot work for now, bug is getting fixed
-                # pdb_options.only_save_these_atoms = atoms
-                temp_pdb = tempfile.NamedTemporaryFile(delete=False, suffix='.pdb')
-
-                curComplex.io.to_pdb(temp_pdb.name, pdb_options)
-
-                temp_openmm_pdb = PDBFile(temp_pdb.name)
-                if openmm_main_pdb == None:
-                    openmm_main_pdb = Modeller(temp_openmm_pdb.topology, temp_openmm_pdb.positions)
-                else:
-                    openmm_main_pdb.add(temp_openmm_pdb.topology, temp_openmm_pdb.positions)
-
+            for molecule in curComplex.molecules:
+                cur_topo = Topology()
+                added_atoms = dict()
+                containChains = False
+                positions = []
+                for chain in molecule.chains:
+                    sim_chain = cur_topo.addChain()
+                    containChains = True
+                    for residue in chain.residues:
+                        residueName = residue.name
+                        if residueName in PDBFile._atomNameReplacements:
+                            atomReplacements = PDBFile._atomNameReplacements[residueName]
+                        else:
+                            atomReplacements = {}
+                        sim_residue = cur_topo.addResidue(residue.name, sim_chain)
+                        for atom in residue.atoms:
+                            #Atom is selected or close to the selection and not an het/ligand
+                            if not atom.is_het and (atom in selected_atoms_per_complex[curComplex.name] or atom in close_atoms_per_complex[curComplex.name]):
+                                symbol = self.__get_atom_symbol(atom.name, len(residue._atoms))
+                                atom_name = atom.name
+                                if atom_name in atomReplacements:
+                                    atom_name = atomReplacements[atom_name]
+                                sim_atom = cur_topo.addAtom(atom_name, symbol, sim_residue)
+                                added_atoms[atom.index] = sim_atom
+                                position = atom.position
+                                positions.append(position.x * 0.1 * nanometer)
+                                positions.append(position.y * 0.1 * nanometer)
+                                positions.append(position.z * 0.1 * nanometer)
+                                #positions.append(Vec3(position.x * 0.1 * nanometer, position.y * 0.1 * nanometer, position.z * 0.1 * nanometer))
+                            if atom.is_het:
+                                het_residue.add_atom(atom)
+                                count_het+=1
+                                for bond in atom.bonds:
+                                    if bond not in het_bonds:
+                                        het_bonds.append(bond)
+                                        het_residue.add_bond(bond)
+                if containChains:
+                    for chain in molecule.chains:
+                        for residue in chain.residues:
+                            for bond in residue.bonds:
+                                if bond.atom1.index in added_atoms and bond.atom2.index in added_atoms:
+                                    atom1 = added_atoms[bond.atom1.index]
+                                    atom2 = added_atoms[bond.atom2.index]
+                                    btype = self._get_bond_type(bond.kind)
+                                    cur_topo.addBond(atom1, atom2, btype)
+                    n = int(len(positions)/3)
+                    positions = np.reshape(positions, (n, 3))
+                    if openmm_main_pdb == None:
+                        openmm_main_pdb = Modeller(cur_topo, positions)
+                    else:
+                        openmm_main_pdb.add(cur_topo, positions)
+                    Logs.debug(openmm_main_pdb.getPositions())
+                
+        Logs.debug("Hetero atoms count =", count_het)
 
         if count_het > 0:
             temp_sdf = tempfile.NamedTemporaryFile(delete=False, suffix='.sdf')
